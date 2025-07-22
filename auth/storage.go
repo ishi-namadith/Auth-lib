@@ -1,90 +1,93 @@
-package auth
+package authentication
 
 import (
-    "context"
-    "database/sql"
-    "fmt"
-    "time"
+	"context"
+	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type RoleAccessModel struct {
+    UserRole string
+    Path     string 
+    Method   string
+}
+
+type PolicyAccessModel struct {
+    UserRole string
+    Policy   string
+}
+
 type PGStorage struct {
-    db *sql.DB
+    db *pgxpool.Pool
 }
 
-type MySQLStorage struct {
-    db *sql.DB
+func NewPGStorage(db *pgxpool.Pool) Storage {
+    return &PGStorage{db: db}
 }
 
-func NewDBStorage(database, dsn string) (Storage, error) {
-    db, err := sql.Open(database, dsn)
+func (s *PGStorage) AddRoleAccess(ctx context.Context, userRole, path, method string) error {
+    query := `
+        INSERT INTO role_auth (user_role, path, method)
+        VALUES ($1, $2, $3)
+    `
+    _, err := s.db.Exec(ctx, query, userRole, path, method)
+    return err
+}
+
+func (s *PGStorage) HasRoleAccess(ctx context.Context, userRole, path, method string) (bool, error) {
+	query := `
+		SELECT EXISTS (
+			SELECT 1 FROM role_auth
+			WHERE user_role = $1 AND path = $2 AND method = $3
+		)
+	`
+	var exists bool
+	err := s.db.QueryRow(ctx, query, userRole, path, method).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check route access: %w", err)
+	}
+	return exists, nil
+}
+
+func (s *PGStorage) DeleteRoleAccess(ctx context.Context, userRole, path, method string) error {
+    query := `
+        DELETE FROM role_auth
+        WHERE user_role = $1 AND path = $2 AND method = $3
+    `
+    _, err := s.db.Exec(ctx, query, userRole, path, method)
+    return err
+}
+
+func (s *PGStorage) AddPolicyAccess(ctx context.Context, userID int, policy string) error {
+    query := `
+        INSERT INTO policy_auth (user_id, policy_name)
+        VALUES ($1, $2)
+    `
+    _, err := s.db.Exec(ctx, query, userID, policy)
+    return err
+}
+
+func (s *PGStorage) HasPolicyAccess(ctx context.Context, userID int, policy string) (bool, error) {
+    query := `
+        SELECT EXISTS (
+            SELECT 1 FROM policy_auth
+            WHERE user_id = $1 AND policy_name = $2
+        )
+    `
+    var exists bool
+    err := s.db.QueryRow(ctx, query, userID, policy).Scan(&exists)
     if err != nil {
-        return nil, fmt.Errorf("failed to open database: %w", err)
+        return false, fmt.Errorf("failed to check policy access: %w", err)
     }
-    // Verify connection
-    if err := db.Ping(); err != nil {
-        db.Close()
-        return nil, fmt.Errorf("failed to ping database: %w", err)
-    }
-    switch database {
-    case "postgres":
-        return &PGStorage{db: db}, nil
-    case "mysql":
-        return &MySQLStorage{db: db}, nil
-    default:
-        db.Close()
-        return nil, fmt.Errorf("unsupported database: %s", database)
-    }
+    return exists, nil
 }
 
-func (s *PGStorage) SaveRefreshToken(ctx context.Context, userID, token string, expiresAt time.Time) error {
-    query := `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)`
-    _, err := s.db.ExecContext(ctx, query, userID, token, expiresAt)
-    return err
-}
-
-func (s *PGStorage) DeleteRefreshToken(ctx context.Context, token string) error {
-    query := `DELETE FROM refresh_tokens WHERE token = $1`
-    _, err := s.db.ExecContext(ctx, query, token)
-    return err
-}
-
-func (s *PGStorage) HasRouteAccess(ctx context.Context, user_role, path, method string) (bool, error) {
+func (s *PGStorage) DeletePolicyAccess(ctx context.Context, userID int, policy string) error {
     query := `
-        SELECT EXISTS (
-            SELECT 1
-            FROM user_routes
-            WHERE user_role = $1
-            AND path = $2
-            AND method = $3
-        )`
-    var hasAccess bool
-    err := s.db.QueryRowContext(ctx, query, user_role, path, method).Scan(&hasAccess)
-    return hasAccess, err
-}
-
-// MySQLStorage implements Storage interface for MySQL database
-func (s *MySQLStorage) SaveRefreshToken(ctx context.Context, userID, token string, expiresAt time.Time) error {
-    query := `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?, ?, ?)`
-    _, err := s.db.ExecContext(ctx, query, userID, token, expiresAt)
+        DELETE FROM policy_auth
+        WHERE user_id = $1 AND policy_name = $2
+    `
+    _, err := s.db.Exec(ctx, query, userID, policy)
     return err
 }
 
-func (s *MySQLStorage) DeleteRefreshToken(ctx context.Context, token string) error {
-    query := `DELETE FROM refresh_tokens WHERE token = ?`
-    _, err := s.db.ExecContext(ctx, query, token)
-    return err
-}
-
-func (s *MySQLStorage) HasRouteAccess(ctx context.Context, user_role, path, method string) (bool, error) {
-    query := `
-        SELECT EXISTS (
-            SELECT 1
-            FROM user_routes
-            WHERE user_role = ?
-            AND path = ?
-            AND method = ?
-        )`
-    var hasAccess bool
-    err := s.db.QueryRowContext(ctx, query, user_role, path, method).Scan(&hasAccess)
-    return hasAccess, err
-}
