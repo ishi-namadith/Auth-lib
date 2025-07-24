@@ -49,6 +49,32 @@ func (s *PGStorage) HasRoleAccess(ctx context.Context, userRole, path, method st
 	return exists, nil
 }
 
+func (s *PGStorage) GetAllRoleAccess(ctx context.Context) ([]RoleAccessModel, error) {
+    query := `
+        SELECT user_role, path, method FROM role_auth
+    `
+    rows, err := s.db.Query(ctx, query)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get role access: %w", err)
+    }
+    defer rows.Close()
+    
+    var roleAccesses []RoleAccessModel
+    for rows.Next() {
+        var role RoleAccessModel
+        if err := rows.Scan(&role.UserRole, &role.Path, &role.Method); err != nil {
+            return nil, fmt.Errorf("failed to scan role access: %w", err)
+        }
+        roleAccesses = append(roleAccesses, role)
+    }
+    
+    if err := rows.Err(); err != nil {
+        return nil, fmt.Errorf("error iterating role access rows: %w", err)
+    }
+    
+    return roleAccesses, nil
+}
+
 func (s *PGStorage) DeleteRoleAccess(ctx context.Context, userRole, path, method string) error {
     query := `
         DELETE FROM role_auth
@@ -56,6 +82,50 @@ func (s *PGStorage) DeleteRoleAccess(ctx context.Context, userRole, path, method
     `
     _, err := s.db.Exec(ctx, query, userRole, path, method)
     return err
+}
+
+func (s *PGStorage) AddRolePolicyAccess(ctx context.Context, userRole string, policy string) error {
+    query := `
+        INSERT INTO rolepolicy_auth (user_role, policy_name)
+        VALUES ($1, $2)
+    `
+    _, err := s.db.Exec(ctx, query, userRole, policy)
+    return err
+}
+
+func (s *PGStorage) DeleteRolePolicyAccess(ctx context.Context, userRole string, policy string) error {
+    query := `
+        DELETE FROM rolepolicy_auth
+        WHERE user_role = $1 AND policy_name = $2
+    `
+    _, err := s.db.Exec(ctx, query, userRole, policy)
+    return err
+}
+
+func (s *PGStorage) GetAllPolicyAccess(ctx context.Context) ([]PolicyAccessModel, error) {
+    query := `
+        SELECT user_role, policy_name FROM rolepolicy_auth
+    `
+    rows, err := s.db.Query(ctx, query)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get policy access: %w", err)
+    }
+    defer rows.Close()
+
+    var policyAccesses []PolicyAccessModel
+    for rows.Next() {
+        var policy PolicyAccessModel
+        if err := rows.Scan(&policy.UserRole, &policy.Policy); err != nil {
+            return nil, fmt.Errorf("failed to scan policy access: %w", err)
+        }
+        policyAccesses = append(policyAccesses, policy)
+    }
+    
+    if err := rows.Err(); err != nil {
+        return nil, fmt.Errorf("error iterating policy access rows: %w", err)
+    }
+    
+    return policyAccesses, nil
 }
 
 func (s *PGStorage) AddPolicyAccess(ctx context.Context, userID int, policy string) error {

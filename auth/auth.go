@@ -12,6 +12,7 @@ import (
 
 type authService struct {
 	config Config
+    storage Storage
 	blacklist InMemory
     routeAccess RouteAccess
 }
@@ -22,9 +23,10 @@ type authServiceV2 struct {
     blacklist InMemory
 } 
 // with inmemomory with inmemory Rote Access
-func NewAuthService(config Config, blacklist InMemory , routeAccess RouteAccess) AuthService {
+func NewAuthService(config Config, storage Storage, blacklist InMemory, routeAccess RouteAccess) AuthService {
     return &authService{
         config:    config,
+        storage:   storage,
         blacklist: blacklist,
         routeAccess: routeAccess,
     }
@@ -66,9 +68,13 @@ func (s *authService) GenerateRefreshToken(ctx context.Context, userID int, clai
     return tokenStr, err
 }
 
-func (s *authService) ValidateAccessToken(ctx context.Context, tokenStr string, fingerPRT string) (map[string]interface{}, error) {
-    if s.blacklist.IsBlacklisted(tokenStr) {
+func (s *authService) ValidateAccessToken(ctx context.Context, tokenStr string, userID int, userRole string, fingerPRT string) (map[string]interface{}, error) {
+    if s.blacklist.IsBlacklisted(ctx ,tokenStr) {
         return nil, errors.New("token is blacklisted")
+    }
+    RC_ID := fmt.Sprintf("RC:%d:%s", userID, userRole)
+    if s.blacklist.IsBlacklisted(ctx ,RC_ID) {
+        return nil, errors.New("token is blacklisted due to role change")
     }
     token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -107,7 +113,7 @@ func (s *authService) ValidateAccessToken(ctx context.Context, tokenStr string, 
     hashedFingerPRT := hex.EncodeToString(hasher.Sum(nil))
 
     if fpHashStr != hashedFingerPRT {
-        s.blacklist.Add(tokenStr, expTime)
+        err :=s.blacklist.Add(ctx ,tokenStr, expTime)
         if err != nil {
             return nil, fmt.Errorf("failed to delete refresh token: %w", err)
         }
@@ -117,9 +123,13 @@ func (s *authService) ValidateAccessToken(ctx context.Context, tokenStr string, 
     return claims, nil
 }
 
-func (s *authService) ValidateRefreshToken(ctx context.Context, tokenStr string, fingerPRT string) (map[string]interface{}, error) {
-    if s.blacklist.IsBlacklisted(tokenStr) {
+func (s *authService) ValidateRefreshToken(ctx context.Context, tokenStr string, userID int, userRole string, fingerPRT string) (map[string]interface{}, error) {
+    if s.blacklist.IsBlacklisted(ctx ,tokenStr) {
         return nil, errors.New("token is blacklisted")
+    }
+    RC_ID := fmt.Sprintf("RC:%d:%s", userID, userRole)
+    if s.blacklist.IsBlacklisted(ctx ,RC_ID) {
+        return nil, errors.New("token is blacklisted due to role change")
     }
     token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -159,8 +169,8 @@ func (s *authService) ValidateRefreshToken(ctx context.Context, tokenStr string,
     hashedFingerPRT := hex.EncodeToString(hasher.Sum(nil))
 
     if fpHashStr != hashedFingerPRT {
-        s.blacklist.Add(tokenStr, expTime)
-        if err != nil {
+        err:= s.blacklist.Add(ctx, tokenStr, expTime)
+        if err!= nil {
             return nil, fmt.Errorf("failed to delete refresh token: %w", err)
         }
         return nil, errors.New("fingerprint mismatch")
@@ -169,27 +179,60 @@ func (s *authService) ValidateRefreshToken(ctx context.Context, tokenStr string,
 }
 
 func (s *authService) CreateRoleAccess(ctx context.Context, userRole, path, method string) error {
-    return s.routeAccess.AddRoleAccess(userRole, path, method)
+    err := s.routeAccess.AddRoleAccess(ctx,userRole, path, method)
+    if err != nil {
+        return fmt.Errorf("failed to create role access: %w", err)
+    }
+    err = s.storage.AddRoleAccess(ctx, userRole, path, method)
+    if err != nil {
+        return fmt.Errorf("failed to create role access: %w", err)
+    }
+    return nil
 }
 
 func (s *authService) RemoveRoleAccess(ctx context.Context, userRole, path, method string) error {
-    return s.routeAccess.RemoveRoleAccess(userRole, path, method)
+    err := s.routeAccess.RemoveRoleAccess(ctx, userRole, path, method)
+    if err != nil {
+        return fmt.Errorf("failed to remove role access: %w", err)
+    }
+    err = s.storage.DeleteRoleAccess(ctx, userRole, path, method)
+    if err != nil {
+        return fmt.Errorf("failed to remove role access: %w", err)
+    }
+    return nil
 }
+
 func (s *authService) HasRoleAccess(ctx context.Context, userRole, path, method string) (bool, error) {
-    exists := s.routeAccess.HasRoleAccess(userRole, path, method)
+    exists := s.routeAccess.HasRoleAccess(ctx, userRole, path, method)
     return exists, nil
 }
 
-func (s *authService) CreatePolicyAccess(ctx context.Context, userID int, policy string) error {
-    return s.routeAccess.AddPolicyAccess(userID, policy)
+func (s *authService) CreatePolicyAccess(ctx context.Context, userRole, policy string) error {
+    err := s.routeAccess.AddPolicyAccess(ctx, userRole, policy)
+    if err != nil {
+        return fmt.Errorf("failed to create policy access: %w", err)
+    }
+    err = s.storage.AddRolePolicyAccess(ctx, userRole, policy)
+    if err != nil {
+        return fmt.Errorf("failed to create policy access: %w", err)
+    }
+    return nil
 }
 
-func (s *authService) RemovePolicyAccess(ctx context.Context, userID int, policy string) error {
-    return s.routeAccess.RemovePolicyAccess(userID, policy)
+func (s *authService) RemovePolicyAccess(ctx context.Context, userRole, policy string) error {
+    err := s.routeAccess.RemovePolicyAccess(ctx, userRole, policy)
+    if err != nil {
+        return fmt.Errorf("failed to remove policy access: %w", err)
+    }
+    err = s.storage.DeleteRolePolicyAccess(ctx, userRole, policy)
+    if err != nil {
+        return fmt.Errorf("failed to remove policy access: %w", err)
+    }
+    return nil
 }
 
-func (s *authService) HasPolicyAccess(ctx context.Context, userID int, policy string) (bool, error) {
-    exists := s.routeAccess.HasPolicyAccess(userID, policy)
+func (s *authService) HasPolicyAccess(ctx context.Context, userRole, policy string) (bool, error) {
+    exists := s.routeAccess.HasPolicyAccess(ctx, userRole, policy)
     return exists, nil
 }
 
@@ -200,17 +243,90 @@ func (s *authService) Logout(ctx context.Context, refreshToken string, userID in
     if err != nil || !refresh_claims.Valid {
         return errors.New("invalid refresh token")
     }
+    
     access_claims, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
         return []byte(s.config.AccessTokenSecret), nil
     })
     if err != nil || !access_claims.Valid {
         return errors.New("invalid access token")
     }
-    access_expiresAt := time.Unix(int64(access_claims.Claims.(jwt.MapClaims)["exp"].(float64)), 0)
-    refresh_expiresAt := time.Unix(int64(refresh_claims.Claims.(jwt.MapClaims)["exp"].(float64)), 0)
-    s.blacklist.Add(refreshToken, refresh_expiresAt)
-    s.blacklist.Add(accessToken, access_expiresAt)
-    return err
+
+    accessClaims, ok := access_claims.Claims.(jwt.MapClaims)
+    if !ok {
+        return errors.New("invalid access token claims format")
+    }
+    
+    accessExp, ok := accessClaims["exp"].(float64)
+    if !ok {
+        return errors.New("invalid access token expiration")
+    }
+    access_expiresAt := time.Unix(int64(accessExp), 0)
+
+    refreshClaims, ok := refresh_claims.Claims.(jwt.MapClaims)
+    if !ok {
+        return errors.New("invalid refresh token claims format")
+    }
+    
+    refreshExp, ok := refreshClaims["exp"].(float64)
+    if !ok {
+        return errors.New("invalid refresh token expiration")
+    }
+    refresh_expiresAt := time.Unix(int64(refreshExp), 0)
+    
+    s.blacklist.Add(ctx, refreshToken, refresh_expiresAt)
+    s.blacklist.Add(ctx ,accessToken, access_expiresAt)
+    return nil 
+}
+
+func (s *authService) InvalidateTokenOnRoleChange(ctx context.Context, userID int, userRole string ) error {
+    Rc_ID := fmt.Sprintf("RC:%d:%s", userID, userRole)
+    exp := time.Now().Add(s.config.RefreshTokenExp)
+    s.blacklist.Add(ctx, Rc_ID, exp)
+    return nil
+}
+
+func (s *authService) ReloadRoleAccessCache(ctx context.Context) error {
+    roles, err := s.storage.GetAllRoleAccess(ctx)
+    if err != nil {
+        return fmt.Errorf("failed to get role access from storage: %w", err)
+    }
+
+    err = s.routeAccess.ReloadRoleAccess(ctx, roles)
+    if err != nil {
+        return fmt.Errorf("failed to reload role access cache: %w", err)
+    }
+    
+    return nil
+}
+
+func (s *authService) ReloadPolicyAccessCache(ctx context.Context) error {
+    policies, err := s.storage.GetAllPolicyAccess(ctx)
+    if err != nil {
+        return fmt.Errorf("failed to get policy access from storage: %w", err)
+    }
+
+    err = s.routeAccess.ReloadPolicyAccess(ctx, policies)
+    if err != nil {
+        return fmt.Errorf("failed to reload policy access cache: %w", err)
+    }
+    
+    return nil
+}
+
+func (s *authService) ReloadAllCaches(ctx context.Context) error {
+    if err := s.routeAccess.ClearAllCache(ctx); err != nil {
+        return fmt.Errorf("failed to clear caches: %w", err)
+    }
+
+    if err := s.ReloadRoleAccessCache(ctx); err != nil {
+        return fmt.Errorf("failed to reload role access cache: %w", err)
+    }
+
+    if err := s.ReloadPolicyAccessCache(ctx); err != nil {
+        return fmt.Errorf("failed to reload policy access cache: %w", err)
+    }
+    
+    return nil
 }
 
 func (s *authServiceV2) GenerateAccessToken(ctx context.Context, userID int, claims map[string]interface{}) (string, error) {
@@ -241,9 +357,13 @@ func (s *authServiceV2) GenerateRefreshToken(ctx context.Context, userID int, cl
     return tokenStr, err
 }
 
-func (s *authServiceV2) ValidateAccessToken(ctx context.Context, tokenStr string, fingerPRT string) (map[string]interface{}, error) {
-    if s.blacklist.IsBlacklisted(tokenStr) {
+func (s *authServiceV2) ValidateAccessToken(ctx context.Context, tokenStr string, userID int, userRole string, fingerPRT string) (map[string]interface{}, error) {
+    if s.blacklist.IsBlacklisted(ctx, tokenStr) {
         return nil, errors.New("token is blacklisted")
+    }
+    RC_ID := fmt.Sprintf("RC:%d:%s", userID, userRole)
+    if s.blacklist.IsBlacklisted(ctx, RC_ID) {
+        return nil, errors.New("token is blacklisted due to role change")
     }
     token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -282,16 +402,20 @@ func (s *authServiceV2) ValidateAccessToken(ctx context.Context, tokenStr string
     hashedFingerPRT := hex.EncodeToString(hasher.Sum(nil))
 
     if fpHashStr != hashedFingerPRT {
-        s.blacklist.Add(tokenStr, expTime)
+        s.blacklist.Add(ctx, tokenStr, expTime)
         return nil, errors.New("fingerprint mismatch")
     }
 
     return claims, nil
 }
 
-func (s *authServiceV2) ValidateRefreshToken(ctx context.Context, tokenStr string, fingerPRT string) (map[string]interface{}, error) {
-    if s.blacklist.IsBlacklisted(tokenStr) {
+func (s *authServiceV2) ValidateRefreshToken(ctx context.Context, tokenStr string, userID int, userRole string, fingerPRT string) (map[string]interface{}, error) {
+    if s.blacklist.IsBlacklisted(ctx,tokenStr) {
         return nil, errors.New("token is blacklisted")
+    }
+    RC_ID := fmt.Sprintf("RC:%d:%s", userID, userRole)
+    if s.blacklist.IsBlacklisted(ctx, RC_ID) {
+        return nil, errors.New("token is blacklisted due to role change")
     }
     token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -330,7 +454,7 @@ func (s *authServiceV2) ValidateRefreshToken(ctx context.Context, tokenStr strin
     hashedFingerPRT := hex.EncodeToString(hasher.Sum(nil))
 
     if fpHashStr != hashedFingerPRT {
-        s.blacklist.Add(tokenStr, expTime)
+        s.blacklist.Add(ctx, tokenStr, expTime)
         return nil, errors.New("fingerprint mismatch")
     }
     return claims, nil
@@ -360,6 +484,13 @@ func (s *authServiceV2) RemovePolicyAccess(ctx context.Context, userID int, poli
     return s.storage.DeletePolicyAccess(ctx, userID, policy)
 }
 
+func (s *authServiceV2) InvalidateTokenOnRoleChange(ctx context.Context, userID int, userRole string ) error {
+    Rc_ID := fmt.Sprintf("RC:%d:%s", userID, userRole)
+    exp := time.Now().Add(s.config.RefreshTokenExp)
+    s.blacklist.Add(ctx, Rc_ID, exp)
+    return nil
+}
+
 func (s *authServiceV2) Logout(ctx context.Context, refreshToken string, userID int, accessToken string) error {
     refresh_claims, err := jwt.Parse(refreshToken, func(token *jwt.Token) (interface{}, error) {
         return []byte(s.config.RefreshTokenSecret), nil
@@ -367,17 +498,39 @@ func (s *authServiceV2) Logout(ctx context.Context, refreshToken string, userID 
     if err != nil || !refresh_claims.Valid {
         return errors.New("invalid refresh token")
     }
+    
     access_claims, err := jwt.Parse(accessToken, func(token *jwt.Token) (interface{}, error) {
         return []byte(s.config.AccessTokenSecret), nil
     })
     if err != nil || !access_claims.Valid {
         return errors.New("invalid access token")
     }
-    access_expiresAt := time.Unix(int64(access_claims.Claims.(jwt.MapClaims)["exp"].(float64)), 0)
-    refresh_expiresAt := time.Unix(int64(refresh_claims.Claims.(jwt.MapClaims)["exp"].(float64)), 0)
-    s.blacklist.Add(refreshToken, refresh_expiresAt)
-    s.blacklist.Add(accessToken, access_expiresAt)
-    return err
+
+    accessClaims, ok := access_claims.Claims.(jwt.MapClaims)
+    if !ok {
+        return errors.New("invalid access token claims format")
+    }
+    
+    accessExp, ok := accessClaims["exp"].(float64)
+    if !ok {
+        return errors.New("invalid access token expiration")
+    }
+    access_expiresAt := time.Unix(int64(accessExp), 0)
+
+    refreshClaims, ok := refresh_claims.Claims.(jwt.MapClaims)
+    if !ok {
+        return errors.New("invalid refresh token claims format")
+    }
+    
+    refreshExp, ok := refreshClaims["exp"].(float64)
+    if !ok {
+        return errors.New("invalid refresh token expiration")
+    }
+    refresh_expiresAt := time.Unix(int64(refreshExp), 0)
+    
+    s.blacklist.Add(ctx, refreshToken, refresh_expiresAt)
+    s.blacklist.Add(ctx, accessToken, access_expiresAt)
+    return nil
 }
 
 

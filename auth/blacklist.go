@@ -4,6 +4,7 @@ import (
     "context"
     "sync"
     "time"
+    "errors"
     "github.com/redis/go-redis/v9"
 )
 
@@ -14,7 +15,6 @@ type Blacklist struct {
 
 type BlacklistWithRedis struct {
     client *redis.Client
-    ctx    context.Context
 }
 
 func NewBlacklist() InMemory {
@@ -26,39 +26,45 @@ func NewBlacklist() InMemory {
 func NewBlacklistWithRedis(redisClient *redis.Client) InMemory {
     return &BlacklistWithRedis{
         client: redisClient,
-        ctx:    context.Background(),
     }
 }
 
-func (b *Blacklist) Add(token string, expiresAt time.Time) {
+func (b *Blacklist) Add(ctx context.Context, token string, expiresAt time.Time) error {
     b.mu.Lock()
     defer b.mu.Unlock()
     b.tokens[token] = expiresAt
+    return nil
 }
 
-func (b *Blacklist) IsBlacklisted(token string) bool {
+func (b *Blacklist) IsBlacklisted(ctx context.Context,token string) bool {
     b.mu.RLock()
-    defer b.mu.RUnlock()
     expiration, exists := b.tokens[token]
+    b.mu.RUnlock()
+    
     if !exists {
         return false
     }
+    
     if time.Now().After(expiration) {
-        delete(b.tokens, token)
+        b.mu.Lock()
+        if exp, exists := b.tokens[token]; exists && time.Now().After(exp) {
+            delete(b.tokens, token)
+        }
+        b.mu.Unlock()
         return false
     }
     return true
 }
 
-func (r *BlacklistWithRedis) Add(token string, expiresAt time.Time) {
+func (r *BlacklistWithRedis) Add(ctx context.Context,token string, expiresAt time.Time) error {
     ttl := time.Until(expiresAt)
     if ttl <= 0 {
-        return 
+        return errors.New("token already expired")
     }
-    r.client.Set(r.ctx, "blacklist:"+token, "blacklisted", ttl)
+    return r.client.Set(ctx, "blacklist:"+token, "blacklisted", ttl).Err()
 }
 
-func (r *BlacklistWithRedis) IsBlacklisted(token string) bool {
-    result := r.client.Exists(r.ctx, "blacklist:"+token)
+func (r *BlacklistWithRedis) IsBlacklisted(ctx context.Context, token string) bool {
+    result := r.client.Exists(ctx, "blacklist:"+token)
     return result.Val() > 0
 }
