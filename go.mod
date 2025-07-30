@@ -1,4 +1,4 @@
-module auth-lib
+module github.com/ishi-namadith/auth-lib
 
 go 1.23.6
 
