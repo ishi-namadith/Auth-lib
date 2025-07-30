@@ -32,7 +32,7 @@ Auth-lib/
 ## Installation
 
 ```bash
-go get -u auth-lib
+go get github.com/ishi-namadith/auth-lib
 ```
 
 ## Quick Start
