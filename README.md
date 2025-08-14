@@ -386,14 +386,6 @@ func AuthMiddleware(authService authentication.AuthService) func(http.Handler) h
 - `github.com/jackc/pgx/v5` - PostgreSQL driver
 - `github.com/redis/go-redis/v9` - Redis client (optional)
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
-
 ## Support
 
 For issues and questions, please open an issue on the GitHub repository.
