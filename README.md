@@ -1,6 +1,8 @@
 # Auth-lib
 
-A production-ready Go authentication library with JWT tokens, role-based access control (RBAC), policy-based access control, and caching mechanisms.
+A production-ready Go authentication library with JWT tokens, role-based access control (RBAC), policy-based access control, OTP-based password reset, and flexible caching/storage mechanisms.
+
+---
 
 ## Features
 
@@ -13,6 +15,11 @@ A production-ready Go authentication library with JWT tokens, role-based access 
 - 🔒 **Thread-Safe Operations**: Concurrent-safe implementations
 - 🌐 **Context-Aware**: Full context support with timeout handling
 - 🔄 **Cache Management**: Dynamic cache reloading from database
+- 📧 **Password Reset**: Secure OTP-based password reset with email support
+- 🔄 **Multiple OTP Storage**: In-memory and Redis storage options for OTPs
+- 📨 **Email Service**: Configurable SMTP email service with TLS support
+
+---
 
 ## Architecture
 
@@ -23,17 +30,24 @@ Auth-lib/
 │   ├── blacklist.go     // Token blacklisting (in-memory & Redis)
 │   ├── config.go        // Configuration structs
 │   ├── models.go        // Interfaces and data models
-│   ├── routeAcess.go    // Access control caching
+│   ├── otp.go           // OTP generation and storage (in-memory & Redis)
+│   ├── pwreset.go       // Email service for password reset
+│   ├── routeAcess.go    // Access control caching (in-memory & Redis)
 │   └── storage.go       // PostgreSQL storage operations
 ├── go.mod
+├── go.sum
 └── README.md
 ```
+
+---
 
 ## Installation
 
 ```bash
-go get -u auth-lib
+go get -u github.com/ishi-namadith/auth-lib
 ```
+
+---
 
 ## Quick Start
 
@@ -46,194 +60,137 @@ import (
     "context"
     "log"
     "time"
-    
-    "auth-lib/auth"
+
+    "github.com/ishi-namadith/auth-lib/auth"
+    "github.com/redis/go-redis/v9"
     "github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
-    // Configuration
-    config := authentication.Config{
-        AccessTokenSecret:  "your-super-secret-access-key",
-        RefreshTokenSecret: "your-super-secret-refresh-key",
-        AccessTokenExp:     15 * time.Minute,
-        RefreshTokenExp:    24 * time.Hour,
-    }
+    // Redis client (for blacklist, route access, OTP)
+    redisClient := redis.NewClient(&redis.Options{
+        Addr: "localhost:6379",
+        Password: "",
+        DB: 0,
+    })
 
-    // Database connection
+    // Database connection (for persistent storage)
     db, err := pgxpool.New(context.Background(), "postgres://user:password@localhost/authdb")
     if err != nil {
         log.Fatal("Failed to connect to database:", err)
     }
     defer db.Close()
 
-    // Initialize components
-    storage := authentication.NewPGStorage(db)
-    blacklist := authentication.NewBlacklist()
-    routeAccess := authentication.NewRouteAccessService()
-
-    // Create auth service (with in-memory caching)
-    authService := authentication.NewAuthService(config, storage, blacklist, routeAccess)
-
-    // Load initial cache from database
-    if err := authService.ReloadAllCaches(context.Background()); err != nil {
-        log.Printf("Warning: Failed to load cache: %v", err)
+    // Configuration
+    config := auth.Config{
+        AccessTokenSecret:  "your-super-secret-access-key",
+        RefreshTokenSecret: "your-super-secret-refresh-key",
+        AccessTokenExp:     15 * time.Minute,
+        RefreshTokenExp:    24 * time.Hour,
+        EmailConfig: auth.EmailConfig{
+            Host:     "smtp.gmail.com",
+            Port:     587,
+            Username: "your-email@gmail.com",
+            Password: "your-app-password", // Use App Password for Gmail
+            From:     "your-email@gmail.com",
+            UseTLS:   true,
+        },
     }
+
+    // Initialize components
+    storage := auth.NewPGStorage(db)
+    blacklist := auth.NewBlacklistWithRedis(redisClient)
+    routeAccess := auth.NewRouteAccessServiceWithRedis(redisClient)
+    otpStore := auth.NewRedisOTPStore(redisClient)
+
+    // Create auth service
+    authService := auth.NewAuthService(config, storage, blacklist, routeAccess, otpStore)
 
     log.Println("Auth service initialized successfully")
 }
 ```
 
-### Token Generation and Validation
+---
+
+## Token Generation and Validation
 
 ```go
 ctx := context.Background()
 
 // Generate access token
 token, err := authService.GenerateAccessToken(ctx, userID, map[string]interface{}{
-    "role":       "admin",
-    "fingerPRT":  "user-fingerprint-hash",
-    "email":      "user@example.com",
+    "role":      "admin",
+    "fingerPRT": "user-fingerprint-hash",
+    "email":     "user@example.com",
 })
-if err != nil {
-    log.Printf("Token generation failed: %v", err)
-}
 
 // Validate access token
-claims, err := authService.ValidateAccessToken(ctx, token, userID, "admin", "user-fingerprint")
-if err != nil {
-    log.Printf("Token validation failed: %v", err)
-}
+claims, err := authService.ValidateAccessToken(ctx, token, userID, "admin", "user-fingerprint-hash")
 
 // Generate refresh token
 refreshToken, err := authService.GenerateRefreshToken(ctx, userID, map[string]interface{}{
-    "role":       "admin",
-    "fingerPRT":  "user-fingerprint-hash",
+    "role":      "admin",
+    "fingerPRT": "user-fingerprint-hash",
 })
 ```
 
-### Role-Based Access Control
+---
+
+## Role-Based and Policy-Based Access Control
 
 ```go
 // Create role access
 err := authService.CreateRoleAccess(ctx, "admin", "/api/users", "GET")
-if err != nil {
-    log.Printf("Failed to create role access: %v", err)
-}
 
 // Check role access
 hasAccess, err := authService.HasRoleAccess(ctx, "admin", "/api/users", "GET")
-if err != nil {
-    log.Printf("Failed to check access: %v", err)
-}
-
-if hasAccess {
-    log.Println("Access granted")
-} else {
-    log.Println("Access denied")
-}
 
 // Remove role access
 err = authService.RemoveRoleAccess(ctx, "admin", "/api/users", "DELETE")
-```
 
-### Policy-Based Access Control
-
-```go
 // Create policy access
 err := authService.CreatePolicyAccess(ctx, "admin", "user:read")
-if err != nil {
-    log.Printf("Failed to create policy: %v", err)
-}
 
 // Check policy access
 hasPolicy, err := authService.HasPolicyAccess(ctx, "admin", "user:read")
-if err != nil {
-    log.Printf("Failed to check policy: %v", err)
-}
 
 // Remove policy access
 err = authService.RemovePolicyAccess(ctx, "admin", "user:read")
 ```
 
-### Token Management
+---
+
+## Password Reset (OTP via Email)
 
 ```go
-// Logout (blacklist tokens)
-err := authService.Logout(ctx, refreshToken, userID, accessToken)
-if err != nil {
-    log.Printf("Logout failed: %v", err)
-}
+// Initiate password reset (sends OTP to email)
+err := authService.InitiatePasswordReset(ctx, "user@example.com")
 
-// Invalidate tokens on role change
-err = authService.InvalidateTokenOnRoleChange(ctx, userID, "new-role")
-if err != nil {
-    log.Printf("Role change invalidation failed: %v", err)
-}
+// Verify OTP (user submits OTP from email)
+err := authService.VerifyPasswordResetOTP(ctx, "user@example.com", "123456")
 ```
 
-### Cache Management
+---
+
+## Redis/In-Memory Support
+
+You can use in-memory or Redis for blacklist, route access, and OTP storage:
 
 ```go
-// Reload all caches from database
-err := authService.ReloadAllCaches(ctx)
-if err != nil {
-    log.Printf("Cache reload failed: %v", err)
-}
+// In-memory (single server)
+blacklist := auth.NewBlacklist()
+routeAccess := auth.NewRouteAccessService()
+otpStore := auth.NewMemoryOTPStore()
 
-// Reload specific caches
-err = authService.ReloadRoleAccessCache(ctx)
-err = authService.ReloadPolicyAccessCache(ctx)
+// Redis (distributed)
+blacklist := auth.NewBlacklistWithRedis(redisClient)
+routeAccess := auth.NewRouteAccessServiceWithRedis(redisClient)
+otpStore := auth.NewRedisOTPStore(redisClient)
 ```
 
-## Two Service Variants
+---
 
-### AuthService (Recommended for High Performance)
-- In-memory caching for lightning-fast access control checks
-- Role-based policy access
-- Best for applications requiring high-performance authorization
-
-```go
-authService := authentication.NewAuthService(config, storage, blacklist, routeAccess)
-```
-
-### AuthServiceV2 (Database-Only)
-- Direct database operations without caching
-- User-based policy access (by userID instead of role)
-- Best for simple applications or memory-constrained environments
-
-```go
-authServiceV2 := authentication.NewAuthServiceWithoutInMemoryRA(config, storage, blacklist)
-
-// User-based policy access
-err := authServiceV2.CreatePolicyAccess(ctx, userID, "user:read")
-hasAccess, err := authServiceV2.CheckPolicyAccess(ctx, userID, "user:read")
-```
-
-## Redis Support
-
-### Redis Blacklist
-```go
-import "github.com/redis/go-redis/v9"
-
-redisClient := redis.NewClient(&redis.Options{
-    Addr:     "localhost:6379",
-    Password: "",
-    DB:       0,
-})
-
-blacklist := authentication.NewBlacklistWithRedis(redisClient)
-```
-
-### Redis Route Access Cache
-```go
-routeAccess := authentication.NewRouteAccessServiceWithRedis(redisClient)
-authService := authentication.NewAuthService(config, storage, blacklist, routeAccess)
-```
-
-## Database Schema
-
-Create the following tables in your PostgreSQL database:
+## Database Schema (PostgreSQL)
 
 ```sql
 -- Role-based access control
@@ -245,7 +202,7 @@ CREATE TABLE role_auth (
     PRIMARY KEY (user_role, path, method)
 );
 
--- Role-policy mapping (for AuthService)
+-- Role-policy mapping
 CREATE TABLE rolepolicy_auth (
     user_role VARCHAR(100) NOT NULL,
     policy_name VARCHAR(100) NOT NULL,
@@ -253,7 +210,7 @@ CREATE TABLE rolepolicy_auth (
     PRIMARY KEY (user_role, policy_name)
 );
 
--- User-policy mapping (for AuthServiceV2)
+-- User-policy mapping
 CREATE TABLE policy_auth (
     user_id INTEGER NOT NULL,
     policy_name VARCHAR(100) NOT NULL,
@@ -261,50 +218,50 @@ CREATE TABLE policy_auth (
     PRIMARY KEY (user_id, policy_name)
 );
 
--- Indexes for better performance
+-- Indexes
 CREATE INDEX idx_role_auth_role ON role_auth(user_role);
 CREATE INDEX idx_rolepolicy_auth_role ON rolepolicy_auth(user_role);
 CREATE INDEX idx_policy_auth_user ON policy_auth(user_id);
 ```
 
+---
+
 ## Configuration Options
 
 ```go
 type Config struct {
-    AccessTokenSecret  string        // Secret for signing access tokens
-    RefreshTokenSecret string        // Secret for signing refresh tokens
-    AccessTokenExp     time.Duration // Access token expiration (recommended: 15 minutes)
-    RefreshTokenExp    time.Duration // Refresh token expiration (recommended: 24 hours)
+    AccessTokenSecret  string
+    RefreshTokenSecret string
+    AccessTokenExp     time.Duration
+    RefreshTokenExp    time.Duration
+    EmailConfig        EmailConfig
+}
+
+type EmailConfig struct {
+    Host     string
+    Port     int
+    Username string
+    Password string
+    From     string
+    ReplyTo  string
+    UseTLS   bool
 }
 ```
 
+---
+
 ## Security Features
 
-### Fingerprint Verification
-```go
-// Tokens include SHA256 fingerprint verification
-token, err := authService.GenerateAccessToken(ctx, userID, map[string]interface{}{
-    "fingerPRT": "browser-fingerprint-hash",
-})
+- **Fingerprint Verification**: SHA256 hash of device/browser fingerprint in tokens
+- **Automatic Blacklisting**: On fingerprint mismatch, logout, or role change
+- **Thread-Safe**: Mutexes for in-memory, atomic Redis operations
+- **Context Support**: All operations accept `context.Context`
+- **Short Expiry**: Recommended 15m access, 24h refresh
+- **TLS Email**: Secure SMTP for OTP delivery
 
-// Validation requires matching fingerprint
-claims, err := authService.ValidateAccessToken(ctx, token, userID, "admin", "browser-fingerprint-hash")
-```
-
-### Automatic Token Blacklisting
-- Tokens are automatically blacklisted on fingerprint mismatch
-- Role changes invalidate existing tokens
-- Manual logout blacklists both access and refresh tokens
-- Expired tokens are automatically cleaned up
-
-### Thread-Safe Operations
-- All operations are thread-safe and concurrent-ready
-- Proper mutex usage in in-memory implementations
-- No race conditions in cache operations
+---
 
 ## Error Handling
-
-The library provides detailed error messages for different scenarios:
 
 ```go
 claims, err := authService.ValidateAccessToken(ctx, token, userID, role, fingerprint)
@@ -313,19 +270,21 @@ if err != nil {
     case "token is blacklisted":
         // Handle blacklisted token
     case "fingerprint mismatch":
-        // Handle potential token hijacking
+        // Handle hijacking attempt
     case "invalid token":
-        // Handle malformed or expired token
+        // Handle expired/malformed token
     default:
-        // Handle other errors
+        // Other errors
     }
 }
 ```
 
+---
+
 ## HTTP Middleware Example
 
 ```go
-func AuthMiddleware(authService authentication.AuthService) func(http.Handler) http.Handler {
+func AuthMiddleware(authService auth.AuthService) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             token := r.Header.Get("Authorization")
@@ -333,58 +292,48 @@ func AuthMiddleware(authService authentication.AuthService) func(http.Handler) h
                 http.Error(w, "Missing token", http.StatusUnauthorized)
                 return
             }
-
-            // Remove "Bearer " prefix
-            if len(token) > 7 && token[:7] == "Bearer " {
-                token = token[7:]
-            }
-
-            userID := getUserIDFromToken(token) // Your implementation
-            userRole := getUserRoleFromToken(token) // Your implementation
+            token = strings.TrimPrefix(token, "Bearer ")
             fingerprint := r.Header.Get("X-Fingerprint")
-
-            _, err := authService.ValidateAccessToken(r.Context(), token, userID, userRole, fingerprint)
+            claims, err := authService.ValidateAccessToken(r.Context(), token, getUserID(token), getRole(token), fingerprint)
             if err != nil {
                 http.Error(w, "Invalid token", http.StatusUnauthorized)
                 return
             }
-
-            // Check route access
-            hasAccess, err := authService.HasRoleAccess(r.Context(), userRole, r.URL.Path, r.Method)
-            if err != nil || !hasAccess {
-                http.Error(w, "Access denied", http.StatusForbidden)
-                return
-            }
-
             next.ServeHTTP(w, r)
         })
     }
 }
 ```
 
+---
+
 ## Best Practices
 
-1. **Use HTTPS**: Always use HTTPS in production to protect tokens in transit
-2. **Secure Storage**: Never store tokens in local storage; use secure HTTP-only cookies
-3. **Short Expiration**: Keep access token expiration short (15 minutes recommended)
-4. **Fingerprinting**: Implement browser fingerprinting for additional security
-5. **Regular Cleanup**: Use the automatic cleanup features or implement periodic cleanup
-6. **Error Handling**: Always handle errors appropriately and log security events
-7. **Cache Management**: Reload caches after bulk permission changes
+- Use HTTPS in production
+- Store tokens in HTTP-only cookies
+- Implement rate limiting for password reset/OTP
+- Use short-lived access tokens
+- Reload caches after bulk permission changes
+- Use TLS for email delivery
+
+---
 
 ## Performance Tips
 
-- Use `AuthService` for high-performance applications with frequent access checks
-- Use `AuthServiceV2` for simple applications or when memory is constrained
-- Consider Redis for distributed environments
-- Implement connection pooling for database operations
-- Monitor cache hit rates and adjust cache reload frequency
+- Use Redis for distributed deployments
+- Use in-memory for single-server, high-speed access
+- Monitor cache hit rates
+- Use connection pooling for PostgreSQL
+
+---
 
 ## Dependencies
 
-- `github.com/golang-jwt/jwt/v5` - JWT token handling
+- `github.com/golang-jwt/jwt/v5` - JWT handling
+- `github.com/redis/go-redis/v9` - Redis client
 - `github.com/jackc/pgx/v5` - PostgreSQL driver
-- `github.com/redis/go-redis/v9` - Redis client (optional)
+
+---
 
 ## Contributing
 
@@ -394,6 +343,28 @@ func AuthMiddleware(authService authentication.AuthService) func(http.Handler) h
 4. Ensure all tests pass
 5. Submit a pull request
 
+---
+
 ## Support
 
 For issues and questions, please open an issue on the GitHub repository.
+
+---
+
+## License
+
+MIT License
+
+---
+
+## Authors
+
+- Ishi Namadith
+
+---
+
+## Acknowledgments
+
+- JWT implementation based on `golang-jwt/jwt`
+- Redis support via `go-redis/redis`
+- PostgreSQL integration with `jackc/pgx`
