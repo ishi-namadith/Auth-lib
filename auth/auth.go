@@ -15,28 +15,40 @@ type authService struct {
     storage Storage
 	blacklist InMemory
     routeAccess RouteAccess
+    otpStore    OTPStore
+    emailService EmailService 
 }
 
 type authServiceV2 struct {
 	config Config
 	storage Storage
     blacklist InMemory
-} 
+    otpStore    OTPStore
+    emailService EmailService
+}
+
 // with inmemomory with inmemory Rote Access
-func NewAuthService(config Config, storage Storage, blacklist InMemory, routeAccess RouteAccess) AuthService {
+func NewAuthService(config Config, storage Storage, blacklist InMemory, routeAccess RouteAccess, otpStore OTPStore) AuthService {
+    emailService := NewEmailService(config.EmailConfig)
     return &authService{
-        config:    config,
-        storage:   storage,
-        blacklist: blacklist,
-        routeAccess: routeAccess,
+        config:       config,
+        storage:      storage,
+        blacklist:    blacklist,
+        routeAccess:  routeAccess,
+        otpStore:     otpStore,
+        emailService: emailService,
     }
 }
+
 // without inmemomory without inmemory Rote Access
-func NewAuthServiceWithoutInMemoryRA(config Config, storage Storage, blacklist InMemory) AuthServiceV2 {
+func NewAuthServiceWithoutInMemoryRA(config Config, storage Storage, blacklist InMemory, otpStore OTPStore) AuthServiceV2 {
+    emailService := NewEmailService(config.EmailConfig)
 	return &authServiceV2{
 		config:    config,
 		storage:   storage,
         blacklist: blacklist,
+        otpStore:  otpStore,
+        emailService: emailService,
 	}
 }
 
@@ -329,6 +341,47 @@ func (s *authService) ReloadAllCaches(ctx context.Context) error {
     return nil
 }
 
+func (s *authService) InitiatePasswordReset(ctx context.Context, email string) error {
+    otp, err := GenerateOTP(6)
+    if err != nil {
+        return fmt.Errorf("failed to generate OTP: %w", err)
+    }
+
+    // Store OTP with 15 minutes expiry
+    err = s.otpStore.StoreOTP(ctx, email, otp, 15*time.Minute)
+    if err != nil {
+        return fmt.Errorf("failed to store OTP: %w", err)
+    }
+
+    // Send OTP via email
+    err = s.emailService.SendOTP(email, otp)
+    if err != nil {
+        // delete otp if fails
+        s.otpStore.DeleteOTP(ctx, email)
+        return fmt.Errorf("failed to send OTP email: %w", err)
+    }
+
+    return nil
+}
+
+func (s *authService) VerifyPasswordResetOTP(ctx context.Context, email string, otp string) error {
+    valid, err := s.otpStore.VerifyOTP(ctx, email, otp)
+    if err != nil {
+        return fmt.Errorf("failed to verify OTP: %w", err)
+    }
+    if !valid {
+        return errors.New("invalid OTP")
+    }
+
+    // Delete OTP after successful verification
+    err = s.otpStore.DeleteOTP(ctx, email)
+    if err != nil {
+        return fmt.Errorf("failed to delete OTP: %w", err)
+    }
+
+    return nil
+}
+
 func (s *authServiceV2) GenerateAccessToken(ctx context.Context, userID int, claims map[string]interface{}) (string, error) {
     token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
         "sub": userID,
@@ -530,6 +583,41 @@ func (s *authServiceV2) Logout(ctx context.Context, refreshToken string, userID 
     
     s.blacklist.Add(ctx, refreshToken, refresh_expiresAt)
     s.blacklist.Add(ctx, accessToken, access_expiresAt)
+    return nil
+}
+
+func (s *authServiceV2) InitiatePasswordReset(ctx context.Context, email string) error {
+    otp, err := GenerateOTP(6)
+    if err != nil {
+        return fmt.Errorf("failed to generate OTP: %w", err)
+    }
+
+    err = s.otpStore.StoreOTP(ctx, email, otp, 15*time.Minute)
+    if err != nil {
+        return fmt.Errorf("failed to store OTP: %w", err)
+    }
+
+    // In production, you would send this via email
+    // For demonstration, we'll just log it
+    fmt.Printf("Password reset OTP for %s: %s\n", email, otp)
+    
+    return nil
+}
+
+func (s *authServiceV2) VerifyPasswordResetOTP(ctx context.Context, email string, otp string) error {
+    valid, err := s.otpStore.VerifyOTP(ctx, email, otp)
+    if err != nil {
+        return fmt.Errorf("failed to verify OTP: %w", err)
+    }
+    if !valid {
+        return errors.New("invalid OTP")
+    }
+
+    err = s.otpStore.DeleteOTP(ctx, email)
+    if err != nil {
+        return fmt.Errorf("failed to delete OTP: %w", err)
+    }
+
     return nil
 }
 

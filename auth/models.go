@@ -19,6 +19,8 @@ type AuthService interface {
     InvalidateTokenOnRoleChange(ctx context.Context, userID int, userRole string) error
     Logout(ctx context.Context, refreshToken string, userID int, accessToken string) error
     ReloadAllCaches(ctx context.Context) error
+    InitiatePasswordReset(ctx context.Context, email string) error
+    VerifyPasswordResetOTP(ctx context.Context, email string, otp string) error
 }
 
 type AuthServiceV2 interface {
@@ -34,6 +36,8 @@ type AuthServiceV2 interface {
     InvalidateTokenOnRoleChange(ctx context.Context, userID int, userRole string) error 
     RemovePolicyAccess(ctx context.Context, userID int, policy string) error
 	Logout(ctx context.Context, refreshToken string, userID int, accessToken string) error
+    InitiatePasswordReset(ctx context.Context, email string) error
+    VerifyPasswordResetOTP(ctx context.Context, email string, otp string) error
 }
 
 type Storage interface {
@@ -64,4 +68,14 @@ type RouteAccess interface {
     ReloadRoleAccess(ctx context.Context, roles []RoleAccessModel) error
     ReloadPolicyAccess(ctx context.Context, policies []PolicyAccessModel) error
     ClearAllCache(ctx context.Context) error
+}
+
+type OTPStore interface {
+    StoreOTP(ctx context.Context, email string, otp string, expiry time.Duration) error
+    VerifyOTP(ctx context.Context, email string, otp string) (bool, error)
+    DeleteOTP(ctx context.Context, email string) error
+}
+
+type EmailService interface {
+    SendOTP(to, otp string) error
 }
